@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+dataset/*
+!dataset/README.txt
+!dataset/.gitkeep
+models/*
+!models/README.txt
+!models/.gitkeep
+.kaggle/
+*.zip
