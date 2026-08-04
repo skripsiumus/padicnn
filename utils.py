@@ -7,7 +7,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 
 from config import IMAGE_EXTENSIONS, IMAGE_SIZE
 
@@ -86,3 +86,90 @@ def preprocess_image(image: Image.Image, image_size: int = IMAGE_SIZE) -> np.nda
     image_array = tf.keras.utils.img_to_array(image)
     image_array = np.expand_dims(image_array, axis=0)
     return image_array
+
+
+def _to_rgb_array(image: Image.Image, image_size: int = IMAGE_SIZE) -> np.ndarray:
+    """Ubah gambar menjadi array RGB uint8 berukuran seragam."""
+    rgb_image = image.convert("RGB").resize((image_size, image_size))
+    return np.asarray(rgb_image, dtype=np.uint8)
+
+
+def analyze_leaf_visual(image: Image.Image, image_size: int = IMAGE_SIZE) -> dict:
+    """
+    Analisis ringan untuk menyaring gambar yang jelas bukan foto daun.
+
+    Filter ini tidak menggantikan model khusus kelas ``bukan daun padi``.
+    Tujuannya adalah mencegah foto polos, dokumen, wajah, kendaraan, atau objek
+    lain langsung dipaksa masuk ke salah satu kelas penyakit.
+    """
+    width, height = image.size
+    rgb = _to_rgb_array(image, image_size)
+    hsv = np.asarray(
+        Image.fromarray(rgb, mode="RGB").convert("HSV"),
+        dtype=np.uint8,
+    )
+
+    hue = hsv[..., 0].astype(np.float32)
+    saturation = hsv[..., 1].astype(np.float32)
+    value = hsv[..., 2].astype(np.float32)
+
+    # Rentang dibuat cukup luas agar daun sehat, menguning, bercak cokelat,
+    # dan daun yang mengering tetap dapat lolos sebagai kandidat foto daun.
+    green_mask = (hue >= 35) & (hue <= 125) & (saturation >= 35) & (value >= 25)
+    yellow_brown_mask = (
+        (((hue >= 8) & (hue < 35)) | (hue >= 245))
+        & (saturation >= 35)
+        & (value >= 20)
+    )
+    leaf_color_mask = green_mask | yellow_brown_mask
+
+    margin = max(1, int(image_size * 0.18))
+    center_mask = leaf_color_mask[margin:-margin, margin:-margin]
+
+    gray = rgb.astype(np.float32).mean(axis=2)
+    horizontal_change = np.abs(np.diff(gray, axis=1)).mean()
+    vertical_change = np.abs(np.diff(gray, axis=0)).mean()
+
+    return {
+        "width": int(width),
+        "height": int(height),
+        "min_side": int(min(width, height)),
+        "aspect_ratio": float(max(width, height) / max(1, min(width, height))),
+        "mean_brightness": float(value.mean()),
+        "color_std": float(rgb.astype(np.float32).std()),
+        "saturated_ratio": float((saturation >= 35).mean()),
+        "leaf_color_ratio": float(leaf_color_mask.mean()),
+        "center_leaf_color_ratio": float(center_mask.mean()) if center_mask.size else 0.0,
+        "texture_score": float((horizontal_change + vertical_change) / 2.0),
+    }
+
+
+def build_prediction_batch(image: Image.Image, image_size: int = IMAGE_SIZE) -> np.ndarray:
+    """
+    Membuat tiga variasi ringan (TTA) untuk mengukur kestabilan prediksi.
+
+    Gambar daun padi yang valid umumnya memberikan prediksi yang relatif stabil
+    ketika dicerminkan atau sedikit diubah pencahayaannya.
+    """
+    rgb = image.convert("RGB")
+    variants = [
+        rgb,
+        ImageOps.mirror(rgb),
+        ImageEnhance.Brightness(rgb).enhance(1.08),
+    ]
+    arrays = []
+    for variant in variants:
+        resized = variant.resize((image_size, image_size))
+        arrays.append(tf.keras.utils.img_to_array(resized))
+    return np.stack(arrays, axis=0)
+
+
+def normalized_entropy(probabilities: np.ndarray) -> float:
+    """Entropi 0-1; semakin mendekati 1 berarti model semakin ragu."""
+    probabilities = np.asarray(probabilities, dtype=np.float64)
+    probabilities = np.clip(probabilities, 1e-9, 1.0)
+    if probabilities.size <= 1:
+        return 0.0
+    entropy = -np.sum(probabilities * np.log(probabilities))
+    return float(entropy / np.log(probabilities.size))
+

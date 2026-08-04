@@ -1,0 +1,12 @@
+[
+  {
+    "file": "models/rice_disease_model.keras",
+    "keras_version": "3.13.2",
+    "date_saved": "2026-06-20@04:20:43"
+  },
+  {
+    "file": "model_padi.keras",
+    "keras_version": "3.13.2",
+    "date_saved": "2026-06-20@04:20:43"
+  }
+]

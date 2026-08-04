@@ -29,14 +29,23 @@ from config import (
     IMAGE_SIZE,
     MODEL_INFO_PATH,
     MODEL_PATH,
+    NON_RICE_MESSAGE,
+    RICE_MAX_NORMALIZED_ENTROPY,
+    RICE_MIN_CENTER_LEAF_COLOR_RATIO,
+    RICE_MIN_CONFIDENCE,
+    RICE_MIN_IMAGE_SIDE,
+    RICE_MIN_LEAF_COLOR_RATIO,
+    RICE_MIN_MARGIN,
+    RICE_MIN_TTA_AGREEMENT,
 )
-from utils import load_class_names, load_json, preprocess_image
-from disease_solutions import (
-    get_all_solution_rows,
-    get_registered_solution_names,
-    get_registered_solution_rows,
-    get_solution_for_class,
+from utils import (
+    analyze_leaf_visual,
+    build_prediction_batch,
+    load_class_names,
+    load_json,
+    normalized_entropy,
 )
+from disease_solutions import get_all_solution_rows, get_solution_for_class
 
 st.set_page_config(
     page_title=APP_TITLE,
@@ -125,9 +134,15 @@ def load_model_safely():
     if not MODEL_PATH.exists():
         return None
     try:
-        return tf.keras.models.load_model(MODEL_PATH)
+        # compile=False membuat model hasil training Google Colab lebih mudah dibaca
+        # di Streamlit Cloud karena optimizer tidak perlu dimuat ulang untuk prediksi.
+        return tf.keras.models.load_model(str(MODEL_PATH), compile=False)
     except Exception as error:
-        st.error(f"Model ditemukan, tetapi gagal dibaca: {error}")
+        st.error(f"Model ditemukan di {MODEL_PATH}, tetapi gagal dibaca: {error}")
+        st.info(
+            "Pastikan requirements.txt memakai TensorFlow/Keras yang sesuai "
+            "dengan versi saat model dibuat di Google Colab."
+        )
         return None
 
 
@@ -159,9 +174,16 @@ def load_confusion_matrix() -> pd.DataFrame:
     return pd.DataFrame()
 
 
-def predict_image(model: tf.keras.Model, image: Image.Image, class_names: list[str]) -> tuple[str, float, pd.DataFrame]:
-    image_array = preprocess_image(image, IMAGE_SIZE)
-    probabilities = model.predict(image_array, verbose=0)[0]
+def predict_image(
+    model: tf.keras.Model,
+    image: Image.Image,
+    class_names: list[str],
+) -> tuple[str, float, pd.DataFrame, dict]:
+    # Test-Time Augmentation (TTA): prediksi dirata-ratakan dari beberapa
+    # variasi ringan agar hasil lebih stabil dan membantu mendeteksi gambar OOD.
+    image_batch = build_prediction_batch(image, IMAGE_SIZE)
+    batch_probabilities = model.predict(image_batch, verbose=0)
+    probabilities = np.mean(batch_probabilities, axis=0)
 
     if len(probabilities) != len(class_names):
         raise ValueError(
@@ -173,6 +195,19 @@ def predict_image(model: tf.keras.Model, image: Image.Image, class_names: list[s
     predicted_class = class_names[predicted_idx]
     confidence = float(probabilities[predicted_idx])
 
+    sorted_probabilities = np.sort(probabilities)[::-1]
+    second_confidence = float(sorted_probabilities[1]) if len(sorted_probabilities) > 1 else 0.0
+    margin = confidence - second_confidence
+    variant_predictions = np.argmax(batch_probabilities, axis=1)
+    agreement = float(np.mean(variant_predictions == predicted_idx))
+
+    diagnostics = {
+        "confidence": confidence,
+        "margin": float(margin),
+        "entropy": normalized_entropy(probabilities),
+        "tta_agreement": agreement,
+    }
+
     result_df = pd.DataFrame(
         {
             "Kelas": class_names,
@@ -181,7 +216,55 @@ def predict_image(model: tf.keras.Model, image: Image.Image, class_names: list[s
         }
     ).sort_values("Probabilitas (%)", ascending=False)
 
-    return predicted_class, confidence, result_df
+    return predicted_class, confidence, result_df, diagnostics
+
+
+def is_non_rice_class(class_name: str) -> bool:
+    normalized = class_name.lower().replace("_", " ").replace("-", " ")
+    keywords = (
+        "bukan daun",
+        "bukan padi",
+        "non rice",
+        "non padi",
+        "not rice",
+        "unknown",
+        "other",
+    )
+    return any(keyword in normalized for keyword in keywords)
+
+
+def validate_rice_leaf_candidate(visual: dict, prediction: dict) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+
+    if visual["min_side"] < RICE_MIN_IMAGE_SIDE:
+        reasons.append("resolusi gambar terlalu kecil")
+    if visual["mean_brightness"] < 18 or visual["mean_brightness"] > 245:
+        reasons.append("gambar terlalu gelap atau terlalu terang")
+    if visual["color_std"] < 12 or visual["texture_score"] < 1.0:
+        reasons.append("gambar terlalu polos atau tidak memiliki tekstur daun")
+
+    has_leaf_color = (
+        visual["leaf_color_ratio"] >= RICE_MIN_LEAF_COLOR_RATIO
+        or visual["center_leaf_color_ratio"] >= RICE_MIN_CENTER_LEAF_COLOR_RATIO
+    )
+    if not has_leaf_color:
+        reasons.append("pola warna hijau, kuning, atau cokelat daun tidak cukup terdeteksi")
+
+    confidence = prediction["confidence"]
+    margin = prediction["margin"]
+    entropy = prediction["entropy"]
+    agreement = prediction["tta_agreement"]
+
+    if confidence < RICE_MIN_CONFIDENCE:
+        reasons.append("tingkat keyakinan model terlalu rendah")
+    if confidence < 0.55 and margin < RICE_MIN_MARGIN:
+        reasons.append("dua kelas teratas terlalu sulit dibedakan")
+    if entropy > RICE_MAX_NORMALIZED_ENTROPY:
+        reasons.append("prediksi model terlalu menyebar atau tidak pasti")
+    if agreement < RICE_MIN_TTA_AGREEMENT and confidence < 0.70:
+        reasons.append("hasil prediksi tidak stabil ketika gambar diuji ulang")
+
+    return len(reasons) == 0, reasons
 
 
 def plot_prediction(result_df: pd.DataFrame):
@@ -235,60 +318,6 @@ def render_solution_box(predicted_class: str):
 
     st.caption(
         "Catatan: rekomendasi ini bersifat umum. Untuk penggunaan pestisida/fungisida/bakterisida, "
-        "ikuti label produk dan arahan penyuluh pertanian setempat."
-    )
-
-
-def render_solution_detail(solution: dict):
-    st.markdown(
-        f"""
-        <div class="solution-card">
-            <div class="solution-title">{solution['nama_tampilan']}</div>
-            <span class="solution-badge">{solution['kategori']}</span>
-            <p>{solution['ringkasan']}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    tab_gejala, tab_tangani, tab_cegah = st.tabs(["Gejala", "Cara Menangani", "Pencegahan"])
-    with tab_gejala:
-        for item in solution["gejala"]:
-            st.markdown(f"- {item}")
-    with tab_tangani:
-        for item in solution["penanganan"]:
-            st.markdown(f"- {item}")
-    with tab_cegah:
-        for item in solution["pencegahan"]:
-            st.markdown(f"- {item}")
-
-
-def render_solutions_page():
-    st.subheader("Solusi Setiap Penyakit Daun Padi")
-    st.write(
-        "Halaman ini berisi gejala, cara menangani, dan pencegahan untuk penyakit daun padi "
-        "yang tersedia pada aplikasi. Menu ini dapat dibuka tanpa harus melakukan prediksi terlebih dahulu."
-    )
-
-    registered_rows = get_registered_solution_rows()
-    st.dataframe(pd.DataFrame(registered_rows), use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-    selected_solution = st.selectbox(
-        "Pilih penyakit untuk melihat detail solusi",
-        get_registered_solution_names(),
-    )
-    render_solution_detail(get_solution_for_class(selected_solution))
-
-    st.markdown("---")
-    st.markdown("### Semua Solusi")
-    for disease_name in get_registered_solution_names():
-        solution = get_solution_for_class(disease_name)
-        with st.expander(solution["nama_tampilan"]):
-            render_solution_detail(solution)
-
-    st.caption(
-        "Catatan: rekomendasi ini bersifat umum. Untuk penggunaan pestisida, fungisida, atau bakterisida, "
         "ikuti label produk dan arahan penyuluh pertanian setempat."
     )
 
@@ -374,7 +403,7 @@ with st.sidebar:
     st.title("Menu")
     page = st.radio(
         "Pilih halaman",
-        ["🏠 Beranda", "🔍 Prediksi", "💊 Solusi Penyakit", "📊 Grafik & Evaluasi", "📁 Dataset", "📘 Panduan"],
+        ["🏠 Beranda", "🔍 Prediksi", "📊 Grafik & Evaluasi", "📁 Dataset", "📘 Panduan"],
     )
 
     st.markdown("---")
@@ -383,6 +412,9 @@ with st.sidebar:
         st.markdown('<div class="status-ok">Model siap digunakan</div>', unsafe_allow_html=True)
     else:
         st.markdown('<div class="status-bad">Model belum dilatih</div>', unsafe_allow_html=True)
+
+    st.caption(f"Path model: {MODEL_PATH}")
+    st.caption(f"Path label: {CLASS_NAMES_PATH}")
 
     if model_info:
         st.caption(f"Model: {model_info.get('model_type', '-')}")
@@ -404,7 +436,7 @@ if page == "🏠 Beranda":
     with col2:
         st.markdown('<div class="soft-card"><h3>2. Prediksi CNN</h3><p>Model membaca pola visual dari gambar daun padi.</p></div>', unsafe_allow_html=True)
     with col3:
-        st.markdown('<div class="soft-card"><h3>3. Solusi</h3><p>Aplikasi menampilkan gejala, cara menangani, dan pencegahan penyakit daun padi.</p></div>', unsafe_allow_html=True)
+        st.markdown('<div class="soft-card"><h3>3. Grafik</h3><p>Hasil ditampilkan dalam confidence score dan grafik probabilitas.</p></div>', unsafe_allow_html=True)
 
     st.subheader("Mulai cepat")
     if model is None or not class_names:
@@ -430,42 +462,72 @@ elif page == "🔍 Prediksi":
         if uploaded_file is None:
             st.info("Silakan upload gambar terlebih dahulu.")
         else:
-            image = Image.open(uploaded_file)
+            try:
+                image = Image.open(uploaded_file)
+                image.load()
+            except Exception:
+                st.error("File tidak dapat dibaca sebagai gambar yang valid.")
+                st.stop()
 
             left, right = st.columns([1, 1.1], gap="large")
             with left:
                 st.image(image, caption="Gambar yang diunggah", use_container_width=True)
 
             with right:
-                with st.spinner("Menganalisis gambar..."):
-                    predicted_class, confidence, result_df = predict_image(model, image, class_names)
+                with st.spinner("Memvalidasi dan menganalisis gambar..."):
+                    visual_diagnostics = analyze_leaf_visual(image, IMAGE_SIZE)
+                    predicted_class, confidence, result_df, prediction_diagnostics = predict_image(
+                        model, image, class_names
+                    )
+                    is_valid_rice, rejection_reasons = validate_rice_leaf_candidate(
+                        visual_diagnostics, prediction_diagnostics
+                    )
+
+                # Jika model pada masa mendatang dilatih dengan kelas negatif
+                # seperti "Bukan Daun Padi", kelas tersebut langsung ditolak.
+                if is_non_rice_class(predicted_class):
+                    is_valid_rice = False
+                    rejection_reasons.append("model mengenali kelas bukan daun padi")
 
                 st.markdown("### Hasil Prediksi")
-                st.success(f"Penyakit terdeteksi: **{predicted_class}**")
-                st.metric("Confidence", f"{confidence * 100:.2f}%")
 
-                if confidence < 0.60:
+                if not is_valid_rice:
+                    st.error(NON_RICE_MESSAGE)
                     st.warning(
-                        "Confidence masih rendah. Coba gunakan gambar yang lebih jelas, fokus pada daun, dan pencahayaan cukup."
+                        "Silakan unggah foto close-up daun padi yang jelas, tidak terlalu gelap, "
+                        "dan daun menjadi objek utama pada gambar."
                     )
-                elif confidence < 0.80:
-                    st.info("Confidence cukup, tetapi tetap cek kondisi daun secara langsung.")
+                    with st.expander("Alasan gambar ditolak"):
+                        for reason in rejection_reasons:
+                            st.write(f"- {reason}")
+                        st.caption(
+                            "Validasi ini merupakan penyaring tambahan. Akurasi terbaik tetap diperoleh "
+                            "dengan menambahkan kelas 'Bukan Daun Padi' pada dataset dan melatih ulang model."
+                        )
                 else:
-                    st.info("Confidence tinggi untuk kelas prediksi teratas.")
+                    st.success(f"Penyakit terdeteksi: **{predicted_class}**")
+                    st.metric("Confidence", f"{confidence * 100:.2f}%")
 
-                display_df = result_df.copy()
-                display_df["Probabilitas (%)"] = display_df["Probabilitas (%)"].map(lambda x: f"{x:.2f}%")
-                st.dataframe(display_df[["Kelas", "Probabilitas (%)"]], use_container_width=True, hide_index=True)
+                    if confidence < 0.60:
+                        st.warning(
+                            "Confidence masih rendah. Coba gunakan gambar yang lebih jelas, fokus pada daun, dan pencahayaan cukup."
+                        )
+                    elif confidence < 0.80:
+                        st.info("Confidence cukup, tetapi tetap cek kondisi daun secara langsung.")
+                    else:
+                        st.info("Confidence tinggi untuk kelas prediksi teratas.")
 
-            st.markdown("---")
-            st.subheader("Grafik Hasil Klasifikasi")
-            st.pyplot(plot_prediction(result_df), use_container_width=True)
+                    display_df = result_df.copy()
+                    display_df["Probabilitas (%)"] = display_df["Probabilitas (%)"].map(lambda x: f"{x:.2f}%")
+                    st.dataframe(display_df[["Kelas", "Probabilitas (%)"]], use_container_width=True, hide_index=True)
 
-            st.markdown("---")
-            render_solution_box(predicted_class)
+            if is_valid_rice:
+                st.markdown("---")
+                st.subheader("Grafik Hasil Klasifikasi")
+                st.pyplot(plot_prediction(result_df), use_container_width=True)
 
-elif page == "💊 Solusi Penyakit":
-    render_solutions_page()
+                st.markdown("---")
+                render_solution_box(predicted_class)
 
 elif page == "📊 Grafik & Evaluasi":
     st.subheader("Grafik Training dan Evaluasi Model")
@@ -564,9 +626,17 @@ elif page == "📘 Panduan":
     st.write(
         "Default memakai `simple_cnn` karena tidak perlu internet. Jika ingin mencoba model yang biasanya lebih kuat, gunakan MobileNetV2."
     )
-    st.code("python train_model.py --model mobilenet --epochs 5", language="bash")
+    st.code("python train_model.py --model mobilenet --epochs 15", language="bash")
 
-    st.markdown("### D. Troubleshooting")
+    st.markdown("### D. Validasi gambar non-padi")
+    st.write(
+        "Aplikasi menggunakan pemeriksaan warna/tekstur daun, confidence, entropy, margin antarkelas, "
+        "dan kestabilan prediksi. Untuk hasil paling kuat, tambahkan folder kelas `Bukan Daun Padi` "
+        "berisi foto manusia, kendaraan, dokumen, hewan, makanan, tanaman selain padi, dan latar acak, "
+        "kemudian lakukan training ulang."
+    )
+
+    st.markdown("### E. Troubleshooting")
     st.markdown(
         """
 - Jika muncul **Model belum dilatih**, jalankan `python train_model.py`.

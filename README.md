@@ -143,7 +143,7 @@ python train_model.py --model simple_cnn
 Untuk hasil yang biasanya lebih bagus, coba transfer learning MobileNetV2:
 
 ```bash
-python train_model.py --model mobilenet --epochs 5
+python train_model.py --model mobilenet --epochs 15
 ```
 
 Catatan: MobileNetV2 pertama kali membutuhkan internet untuk download bobot ImageNet.
@@ -229,14 +229,12 @@ Coba kurangi epoch:
 
 ```bash
 python train_model.py --epochs 5
-
-Default jumlah epoch pada aplikasi ini sudah diatur menjadi 5 melalui file `config.py`.
 ```
 
 Atau gunakan gambar lebih kecil:
 
 ```bash
-python train_model.py --img-size 160 --epochs 5
+python train_model.py --img-size 160 --epochs 10
 ```
 
 ---

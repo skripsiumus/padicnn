@@ -5,8 +5,8 @@ Perintah paling mudah:
 python train_model.py
 
 Perintah opsional:
-python train_model.py --epochs 5 --batch-size 32 --model simple_cnn
-python train_model.py --epochs 5 --model mobilenet
+python train_model.py --epochs 30 --batch-size 32 --model simple_cnn
+python train_model.py --epochs 15 --model mobilenet
 
 Catatan:
 - simple_cnn tidak perlu internet.

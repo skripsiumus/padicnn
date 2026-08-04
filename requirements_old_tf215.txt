@@ -1,0 +1,10 @@
+streamlit==1.35.0
+tensorflow-cpu==2.15.0
+keras==2.15.0
+numpy==1.26.4
+pandas==2.2.2
+pillow==10.3.0
+matplotlib==3.8.4
+scikit-learn==1.4.2
+protobuf==4.25.3
+h5py==3.10.0

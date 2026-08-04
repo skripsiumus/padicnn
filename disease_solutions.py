@@ -251,25 +251,6 @@ def get_solution_for_class(class_name: str) -> dict:
     }
 
 
-def get_registered_solution_names() -> list[str]:
-    """Mengambil semua nama penyakit yang sudah tersedia di database solusi."""
-    return [data["nama_tampilan"] for data in DISEASE_SOLUTIONS.values()]
-
-
-def get_registered_solution_rows() -> list[dict]:
-    """Mengambil ringkasan semua solusi, tanpa bergantung pada model yang sudah dilatih."""
-    rows = []
-    for data in DISEASE_SOLUTIONS.values():
-        rows.append(
-            {
-                "nama_penyakit": data["nama_tampilan"],
-                "kategori": data["kategori"],
-                "ringkasan": data["ringkasan"],
-            }
-        )
-    return rows
-
-
 def get_all_solution_rows(class_names: list[str]) -> list[dict]:
     rows = []
     for name in class_names:

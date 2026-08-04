@@ -1,0 +1,10 @@
+PERUBAHAN VERSI VALIDASI GAMBAR NON-PADI
+
+1. Menambahkan pemeriksaan file gambar rusak/tidak valid.
+2. Menambahkan pemeriksaan visual: resolusi, pencahayaan, tekstur, dan warna kandidat daun.
+3. Menambahkan Test-Time Augmentation (gambar asli, mirror, dan variasi brightness).
+4. Menambahkan pemeriksaan confidence, margin, normalized entropy, dan kestabilan prediksi.
+5. Jika gambar ditolak, hasil penyakit, grafik, dan solusi tidak ditampilkan.
+6. Pesan penolakan:
+   Maaf, gambar tersebut bukan foto penyakit daun padi. Sistem tidak dapat mengidentifikasi penyakit daun padi.
+7. Mendukung kelas negatif pada training berikutnya, misalnya folder dataset/Bukan Daun Padi/.
